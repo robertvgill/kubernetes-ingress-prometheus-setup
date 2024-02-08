@@ -1,0 +1,72 @@
+---
+- name: Automated Kubernetes setup with NGINX Ingress and Prometheus
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Install required packages
+      become: true
+      package:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - docker.io
+        - curl
+
+    - name: Install KinD
+      become: true
+      command: >
+        curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.11.1/kind-linux-amd64 &&
+        chmod +x /usr/local/bin/kind
+
+    - name: Create KinD cluster
+      become: true
+      command: kind create cluster --name mycluster
+
+    - name: Install kubectl
+      become: true
+      command: >
+        curl -LO https://dl.k8s.io/release/v1.23.2/bin/linux/amd64/kubectl &&
+        install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+    - name: Install NGINX Ingress Controller
+      become: true
+      command: >
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+    - name: Install Prometheus
+      become: true
+      command: >
+        kubectl apply -f https://raw.githubusercontent.com/prometheus/prometheus/main/documentation/examples/prometheus-k8s-example.yaml
+
+    - name: Deploy NGINX Ingress Controller Backend Services
+      become: true
+      command: >
+        kubectl apply -f https://raw.githubusercontent.com/hashicorp/http-echo/main/examples/k8s/http-echo.yaml
+
+    - name: Deploy NGINX Ingress Controller Ingress Resource
+      become: true
+      command: >
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+    - name: Ensure configuration health
+      become: true
+      command: kubectl get pods --namespace default
+
+    - name: Run benchmarking tool
+      become: true
+      command: >
+        ab -n 1000 -c 10 http://localhost/foo
+        ab -n 1000 -c 10 http://localhost/bar
+
+    - name: Generate CSV file of time-series data using PromQL
+      become: true
+      shell: |
+        kubectl exec -it -n monitoring $(kubectl get pods -n monitoring -l app=prometheus -o jsonpath="{.items[0].metadata.name}") -- /bin/sh -c 'promtool query instant --output=csv "avg_over_time(nginx_ingress_controller_requests_total{namespace=\"default\"}[5m])" > /tmp/metrics.csv'
+        kubectl exec -it -n monitoring $(kubectl get pods -n monitoring -l app=prometheus -o jsonpath="{.items[0].metadata.name}") -- /bin/sh -c 'promtool query instant --output=csv "avg_over_time(container_memory_usage_bytes{name=\"nginx-ingress-controller\"}[5m])" >> /tmp/metrics.csv'
+        kubectl exec -it -n monitoring $(kubectl get pods -n monitoring -l app=prometheus -o jsonpath="{.items[0].metadata.name}") -- /bin/sh -c 'promtool query instant --output=csv "avg_over_time(container_cpu_usage_seconds_total{name=\"nginx-ingress-controller\"}[5m])" >> /tmp/metrics.csv'
+
+    - name: Copy CSV file from remote to local
+      fetch:
+        src: /tmp/metrics.csv
+        dest: /path/to/local/metrics.csv
